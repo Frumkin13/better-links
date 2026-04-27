@@ -221,7 +221,7 @@ export class BetterLinksSettingTab extends PluginSettingTab {
                 .setName(t("settingsAliasTitlePropertyName"))
                 .setDesc(t("settingsAliasTitlePropertyDesc"))
                 .addText((text) => {
-                    text.setPlaceholder("title").setValue(this.plugin.settings.aliasTitleProperty ?? "title").onChange(async (value) => {
+                    text.setPlaceholder("Title").setValue(this.plugin.settings.aliasTitleProperty ?? "title").onChange(async (value) => {
                         this.plugin.settings.aliasTitleProperty = value || "title";
                         await this.plugin.saveSettings();
                     });
@@ -302,6 +302,47 @@ export class BetterLinksSettingTab extends PluginSettingTab {
 						});
 				});
 		});
+
+		let smartSplitEl: HTMLElement | null = null;
+		const updateSmartSplitVisibility = () => {
+			const mode = this.plugin.settings.internalLinkOpenMode ?? "tab";
+			const isSplit = mode === "split-horizontal" || mode === "split-vertical";
+			smartSplitEl?.toggleClass("is-hidden", !isSplit);
+		};
+
+		actionGroup.addSetting((setting) => {
+			setting
+				.setName(t("settingsOpenInternalName"))
+				.setDesc(t("settingsOpenInternalDesc"))
+				.addDropdown((dropdown) => {
+					dropdown
+						.addOption("current", t("settingsOpenInternalCurrent"))
+						.addOption("tab", t("settingsOpenInternalTab"))
+						.addOption("window", t("settingsOpenInternalWindow"))
+						.addOption("split-horizontal", t("settingsOpenInternalSplitH"))
+						.addOption("split-vertical", t("settingsOpenInternalSplitV"))
+						.setValue(this.plugin.settings.internalLinkOpenMode ?? "tab")
+						.onChange(async (value) => {
+							this.plugin.settings.internalLinkOpenMode = value as typeof this.plugin.settings.internalLinkOpenMode;
+							await this.plugin.saveSettings();
+							updateSmartSplitVisibility();
+						});
+				});
+		});
+
+		actionGroup.addSetting((setting) => {
+			smartSplitEl = setting.settingEl;
+			setting
+				.setName(t("settingsSmartSplitName"))
+				.setDesc(t("settingsSmartSplitDesc"))
+				.addToggle((toggle) => {
+					toggle.setValue(this.plugin.settings.smartSplit ?? true).onChange(async (value) => {
+						this.plugin.settings.smartSplit = value;
+						await this.plugin.saveSettings();
+					});
+				});
+		});
+		updateSmartSplitVisibility();
 
 		actionGroup.addSetting((setting) => {
 			setting
