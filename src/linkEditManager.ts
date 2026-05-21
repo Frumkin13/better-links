@@ -16,7 +16,7 @@ export class LinkEditManager {
 	/** 当前 destination 输入框是否处于警告状态（校验失败） */
 	private destinationInvalid = false;
 	/** debounce 定时器 */
-	private validateDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+	private validateDebounceTimer: number | null = null;
 	/** 链接目标 suggest 实例（单例，复用避免重复创建 suggestion-container） */
 	private readonly suggest: LinkDestinationSuggest;
 
@@ -251,7 +251,22 @@ export class LinkEditManager {
 			noticeKey = "noticeLinkRemoved";
 		}
 
+		// 记录链接起始位置，完全移除时用于恢复光标
+		const cursorPos = forceRemoveAll ? { ...session.match.range.from } : null;
+
 		this.replaceActiveRange(replacement);
+
+		// 完全移除链接后，将光标定位到链接原起始处
+		// 需要先 focus editor，否则 popover button 持有焦点时 setCursor 不生效
+		if (cursorPos) {
+			const markdownView = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+			const editor = markdownView?.editor;
+			if (editor) {
+				editor.focus();
+				editor.setCursor(cursorPos);
+			}
+		}
+
 		new Notice(this.plugin.t(noticeKey));
 		this.close();
 	}
@@ -302,14 +317,14 @@ export class LinkEditManager {
 	/** 调度 debounce 校验（300ms） */
 	private scheduleValidation(destination: string): void {
 		this.cancelPendingValidation();
-		this.validateDebounceTimer = setTimeout(() => {
+		this.validateDebounceTimer = window.setTimeout(() => {
 			this.validateDestination(destination);
 		}, 300);
 	}
 
 	private cancelPendingValidation(): void {
 		if (this.validateDebounceTimer !== null) {
-			clearTimeout(this.validateDebounceTimer);
+			window.clearTimeout(this.validateDebounceTimer);
 			this.validateDebounceTimer = null;
 		}
 	}

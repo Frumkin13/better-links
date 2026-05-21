@@ -2,7 +2,7 @@ import { EditorView } from "@codemirror/view";
 import type { VirtualElement } from "@popperjs/core";
 import { MarkdownView, Notice } from "obsidian";
 import type BetterLinksPlugin from "./main";
-import { findLinkAtOffset, findLinkByDestination, withEditorRange, type EditorLinkMatch } from "./linkDetector";
+import { findLinkAtOffset, findLinkByDestination, withEditorRange, type EditorLinkMatch, type RelativeLinkMatch } from "./linkDetector";
 import type { LinkEditManager } from "./linkEditManager";
 import { normalizeEditableValues, openLink } from "./linkActions";
 
@@ -37,11 +37,39 @@ function dbg(enabled: boolean, ...args: unknown[]): void {
 	if (enabled) console.debug("[BetterLinks]", ...args);
 }
 
+/**
+ * 计算链接在 Live Preview 中的可见结束偏移（文档绝对偏移）。
+ * Markdown 链接的 `](url)` 在 Live Preview 下被折叠，`coordsAtPos(match.end)` 可能返回 null；
+ * 用 `]` 的位置 + 1 作为可见结束位置，确保 `coordsAtPos` 能返回有效坐标。
+ */
+function computeVisibleEndOffset(match: RelativeLinkMatch, lineStartOffset: number): number {
+	if (match.type === "markdown" || match.type === "imageMarkdown") {
+		const closeBracket = match.originalText.indexOf("]");
+		if (closeBracket >= 0) {
+			return lineStartOffset + match.start + closeBracket + 1;
+		}
+	}
+	return lineStartOffset + match.end;
+}
+
+/**
+ * 同 computeVisibleEndOffset，但返回行内字符偏移（ch）。
+ */
+function computeVisibleEndCh(match: EditorLinkMatch): number {
+	if (match.type === "markdown" || match.type === "imageMarkdown") {
+		const closeBracket = match.originalText.indexOf("]");
+		if (closeBracket >= 0) {
+			return match.range.from.ch + closeBracket + 1;
+		}
+	}
+	return match.range.to.ch;
+}
+
 export class LinkInterceptor {
 	/** hover 模式：延迟显示定时器 */
-	private hoverShowTimer: ReturnType<typeof setTimeout> | null = null;
+	private hoverShowTimer: number | null = null;
 	/** hover 模式：延迟关闭定时器 */
-	private hoverHideTimer: ReturnType<typeof setTimeout> | null = null;
+	private hoverHideTimer: number | null = null;
 	/** hover 模式：当前悬停链接的序列化 key（用于判断是否同一个链接） */
 	private hoveredLinkKey: string | null = null;
 	/** pointerdown 拦截成功标记，用于让后续 click 事件配合 preventDefault */
@@ -56,7 +84,6 @@ export class LinkInterceptor {
 		match: ReturnType<typeof findLinkAtOffset>;
 		position: { line: number; ch: number };
 		markdownView: MarkdownView;
-		editorView: EditorView;
 		target: HTMLElement;
 	} | null = null;
 
@@ -67,8 +94,13 @@ export class LinkInterceptor {
 
 	/**
 	 * pointerdown capture：在移动端 Obsidian 处理链接跳转之前抢先拦截。
-	 * 仅在 click 触发模式下生效——标记此次交互已被插件接管，
+	 *
+	 * click 触发模式：拦截左键（button === 0）和 touch，标记此次交互已被插件接管，
 	 * 后续 click 事件中根据标记完成打开 popover 的实际逻辑。
+	 *
+	 * right-click 触发模式：拦截右键（button === 2）的 pointerdown，
+	 * preventDefault 阻止后续 mousedown 事件传播给 CM6，
+	 * 防止光标移动导致 Live Preview 展开链接（文本跳动）。
 	 */
 	handlePointerDown(event: PointerEvent): void {
 		this.pointerDownIntercepted = false;
@@ -78,6 +110,13 @@ export class LinkInterceptor {
 		if (!this.plugin.settings.enabled) { dbg(this.plugin.settings.debugMode ?? false, "⏹ disabled"); return; }
 		const triggerMethod = this.plugin.settings.triggerMethod ?? "hover";
 		dbg(this.plugin.settings.debugMode ?? false, "triggerMethod:", triggerMethod);
+
+		// right-click 模式：拦截右键 pointerdown，阻止 CM6 光标移动和 Live Preview 展开
+		if (triggerMethod === "right-click" && event.button === 2) {
+			this.preventRightClickExpansion(event);
+			return;
+		}
+
 		if (triggerMethod !== "click") { dbg(this.plugin.settings.debugMode ?? false, "⏹ not click mode, skip pointerdown intercept"); return; }
 		// 移动端触屏 event.button 可能为 -1，用 pointerType 区分触屏与右键
 		// 只处理 mouse 左键（button === 0）和 touch（button === -1 或 0）
@@ -145,6 +184,39 @@ export class LinkInterceptor {
 			event.stopPropagation();
 		}
 		this.pointerDownIntercepted = true;
+	}
+
+	/**
+	 * right-click 模式专用：在 pointerdown(button=2) 阶段检测右键是否落在链接上，
+	 * 如果是则 preventDefault 阻止后续 mousedown 传播给 CM6，
+	 * 防止光标移动导致 Live Preview 展开/折叠（文本跳动）。
+	 */
+	private preventRightClickExpansion(event: PointerEvent): void {
+		const target = event.target;
+		if (!(target instanceof HTMLElement)) return;
+		if (target.matches("img") || target.closest("img") || target.closest(".image-embed")) return;
+
+		const markdownView = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!markdownView?.file || !markdownView.containerEl.contains(target)) return;
+
+		const cmEditorEl = target.closest(".cm-editor");
+		if (!(cmEditorEl instanceof HTMLElement)) return;
+
+		const editorView = EditorView.findFromDOM(cmEditorEl);
+		if (!editorView) return;
+
+		const documentOffset = editorView.posAtCoords({ x: event.clientX, y: event.clientY }, false);
+		if (documentOffset == null) return;
+
+		const position = markdownView.editor.offsetToPos(documentOffset);
+		const lineText = markdownView.editor.getLine(position.line);
+		const match = findLinkAtOffset(lineText, position.ch, this.plugin.settings);
+		if (!match) return;
+
+		// 确认右键落在链接上 → preventDefault 阻止 mousedown 传播给 CM6
+		// 仅 preventDefault，不 stopPropagation：contextmenu 事件需要正常传播
+		dbg(this.plugin.settings.debugMode ?? false, "✅ right-click pointerdown on link — preventDefault to block CM6 cursor move");
+		event.preventDefault();
 	}
 
 	/**
@@ -223,7 +295,7 @@ export class LinkInterceptor {
 		this.touchStartX = x;
 		this.touchStartY = y;
 		this.touchIntercepted = true;
-		this.touchLinkContext = { match, position, markdownView, editorView, target };
+		this.touchLinkContext = { match, position, markdownView, target };
 
 		dbg(this.plugin.settings.debugMode ?? false, "touchstart ✅ preventDefault — blocking Obsidian navigation, will open popover on touchend");
 		event.preventDefault();
@@ -259,7 +331,7 @@ export class LinkInterceptor {
 			return;
 		}
 
-		const { match, position, markdownView, editorView, target } = this.touchLinkContext;
+		const { match, position, markdownView, target } = this.touchLinkContext;
 		this.touchIntercepted = false;
 		this.touchLinkContext = null;
 
@@ -335,7 +407,7 @@ export class LinkInterceptor {
 		}
 		this.clearHoverHideTimer();
 		const delay = HOVER_LEAVE_DELAY;
-		this.hoverHideTimer = setTimeout(() => {
+		this.hoverHideTimer = window.setTimeout(() => {
 			// 关闭前再次检查，防止计时期间用户开始交互
 			if (this.linkEditManager.isUserInteracting()) {
 				return;
@@ -474,8 +546,9 @@ export class LinkInterceptor {
 				return;
 			}
 
+			const embedVisibleEndCh = computeVisibleEndCh(editorMatch);
 			const referenceEl = triggerMethod === "right-click"
-				? this.createVirtualReferenceForRange(editorView, editorMatch.range.from.line, editorMatch.range.from.ch, editorMatch.range.to.ch)
+				? this.createVirtualReferenceForRange(editorView, editorMatch.range.from.line, editorMatch.range.from.ch, embedVisibleEndCh, event.clientX, event.clientY)
 				: anchorEl;
 			this.linkEditManager.show(editorMatch, referenceEl, anchorEl);
 			return;
@@ -545,14 +618,15 @@ export class LinkInterceptor {
 			return;
 		}
 
+		const virtualEndOffset = computeVisibleEndOffset(match, lineStartOffset);
 		const referenceEl = triggerMethod === "right-click"
-			? this.createVirtualReference(matchStartOffset, lineStartOffset + match.end, editorView)
+			? this.createVirtualReference(matchStartOffset, virtualEndOffset, editorView, event.clientX, event.clientY)
 			: this.resolveReferenceElement(event.clientX, event.clientY, target, markdownView);
 		this.linkEditManager.show(editorMatch, referenceEl, target);
 	}
 
 	private resolveReferenceElement(x: number, y: number, fallback: HTMLElement, markdownView: MarkdownView): HTMLElement {
-		const pointEl = document.elementFromPoint(x, y);
+		const pointEl = fallback.doc.elementFromPoint(x, y);
 		if (pointEl instanceof HTMLElement && markdownView.containerEl.contains(pointEl)) {
 			return pointEl;
 		}
@@ -632,13 +706,16 @@ export class LinkInterceptor {
 		return !!findLinkAtOffset(lineText, position.ch, this.plugin.settings);
 	}
 
-	private createVirtualReferenceForRange(editorView: EditorView, line: number, fromCh: number, toCh: number): VirtualElement {
+	private createVirtualReferenceForRange(editorView: EditorView, line: number, fromCh: number, toCh: number, fallbackX?: number, fallbackY?: number): VirtualElement {
 		const lineFrom = editorView.state.doc.line(line + 1).from;
-		return this.createVirtualReference(lineFrom + fromCh, lineFrom + toCh, editorView);
+		return this.createVirtualReference(lineFrom + fromCh, lineFrom + toCh, editorView, fallbackX, fallbackY);
 	}
 
-	private createVirtualReference(from: number, to: number, editorView: EditorView): VirtualElement {
-		let lastRect = new DOMRect(0, 0, 1, 1);
+	private createVirtualReference(from: number, to: number, editorView: EditorView, fallbackX?: number, fallbackY?: number): VirtualElement {
+		const fallbackRect = (fallbackX != null && fallbackY != null)
+			? new DOMRect(fallbackX, fallbackY, 1, 1)
+			: new DOMRect(0, 0, 1, 1);
+		let lastRect = fallbackRect;
 		return {
 			contextElement: editorView.dom,
 			getBoundingClientRect: () => {
@@ -646,6 +723,9 @@ export class LinkInterceptor {
 				const end = editorView.coordsAtPos(to);
 				if (start && end) {
 					lastRect = new DOMRect(start.left, start.top, Math.max(1, end.right - start.left), Math.max(1, start.bottom - start.top));
+				} else if (start) {
+					// end 可能因 Live Preview 折叠区域在行尾而返回 null，用 start 构建矩形
+					lastRect = new DOMRect(start.left, start.top, 1, Math.max(1, start.bottom - start.top));
 				}
 				return lastRect;
 			},
@@ -693,7 +773,7 @@ export class LinkInterceptor {
 		this.clearHoverHideTimer();
 		this.hoveredLinkKey = linkKey;
 
-		this.hoverShowTimer = setTimeout(() => {
+		this.hoverShowTimer = window.setTimeout(() => {
 			this.hoverShowTimer = null;
 			if (!targetEl.isConnected) return;
 			this.linkEditManager.show(editorMatch, targetEl);
@@ -795,14 +875,14 @@ export class LinkInterceptor {
 
 	private clearHoverShowTimer(): void {
 		if (this.hoverShowTimer !== null) {
-			clearTimeout(this.hoverShowTimer);
+			window.clearTimeout(this.hoverShowTimer);
 			this.hoverShowTimer = null;
 		}
 	}
 
 	private clearHoverHideTimer(): void {
 		if (this.hoverHideTimer !== null) {
-			clearTimeout(this.hoverHideTimer);
+			window.clearTimeout(this.hoverHideTimer);
 			this.hoverHideTimer = null;
 		}
 	}
@@ -826,7 +906,7 @@ export class LinkInterceptor {
 
 		// 2. 必须在 cm-embed-block 内（callout / embed 等）
 		const embedBlock = anchor.closest(".cm-embed-block");
-		if (!embedBlock || !(embedBlock instanceof HTMLElement)) return null;
+		if (!embedBlock || !embedBlock.instanceOf(HTMLElement)) return null;
 
 		// 3. 获取链接目标
 		const href = anchor.getAttribute("data-href") ?? anchor.getAttribute("href");
