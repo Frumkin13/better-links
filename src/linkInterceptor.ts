@@ -635,9 +635,16 @@ export class LinkInterceptor {
 
 	/**
 	 * 判断点 (x, y) 是否在链接的可视矩形内。
-	 * 支持跨行（软换行）链接：
-	 * - 单行链接：检查左/右/上/下边界
-	 * - 跨行链接：首行检查左边界，末行检查右边界，中间行整行命中
+	 * 支持跨行（软换行）链接，以及 RTL 文字方向。
+	 *
+	 * RTL 检测策略：直接比较 matchStart.left 与 matchEnd.left。
+	 * 对于 RTL 文字，起始字符（逻辑上靠前）在视觉上位于右侧，
+	 * 因此 matchStart.left > matchEnd.left 表示 RTL。
+	 * 这个方法不依赖 DOM dir 属性，能正确处理以中性/弱字符开头的行
+	 * （这类行 CM6 不设置 dir="rtl" 但内容本身是 RTL 的情况）。
+	 *
+	 * - 单行链接：检查 min/max 水平边界
+	 * - 跨行链接：首行检查起始端边界，末行检查结束端边界，中间行整行命中
 	 */
 	private isPointInsideLinkRect(
 		x: number, y: number,
@@ -653,11 +660,23 @@ export class LinkInterceptor {
 
 		const isMultiLine = matchEnd.top > matchStart.bottom;
 
+		// 用 min/max 取真实视觉左右边界，自动兼容 RTL（RTL 时 matchStart.left > matchEnd.left）
+		const linkLeft = Math.min(matchStart.left, matchEnd.left);
+		const linkRight = Math.max(matchStart.right, matchEnd.right);
+		// RTL 时起始端在右侧，LTR 时起始端在左侧
+		const isRtl = matchStart.left > matchEnd.left;
+
 		if (!isMultiLine) {
-			// 单行：沿用原有逻辑
-			if (Math.abs(documentOffset - matchStartOffset) <= BUFFER && x <= matchStart.left + BUFFER) return false;
-			if (Math.abs(documentOffset - matchEndOffset) <= BUFFER && x >= matchEnd.right - BUFFER) return false;
-			if (x > matchEnd.right) return false;
+			// 靠近起始端：RTL 时起始端在右，LTR 时起始端在左
+			if (Math.abs(documentOffset - matchStartOffset) <= BUFFER) {
+				if (isRtl ? x >= linkRight - BUFFER : x <= linkLeft + BUFFER) return false;
+			}
+			// 靠近结束端：RTL 时结束端在左，LTR 时结束端在右
+			if (Math.abs(documentOffset - matchEndOffset) <= BUFFER) {
+				if (isRtl ? x <= linkLeft + BUFFER : x >= linkRight - BUFFER) return false;
+			}
+			// 超出整个链接的水平范围
+			if (x < linkLeft - BUFFER || x > linkRight + BUFFER) return false;
 			return true;
 		}
 
@@ -666,14 +685,20 @@ export class LinkInterceptor {
 		const onLastLine = y >= matchEnd.top;
 
 		if (onFirstLine) {
-			// 首行：只检查左边界（右侧延伸到行尾）
-			if (Math.abs(documentOffset - matchStartOffset) <= BUFFER && x <= matchStart.left + BUFFER) return false;
+			// 首行：检查起始端边界（RTL 时起始端在右侧）
+			const startEdge = isRtl ? matchStart.right : matchStart.left;
+			if (Math.abs(documentOffset - matchStartOffset) <= BUFFER) {
+				if (isRtl ? x >= startEdge - BUFFER : x <= startEdge + BUFFER) return false;
+			}
 			return true;
 		}
 		if (onLastLine) {
-			// 末行：只检查右边界（左侧从行首开始）
-			if (Math.abs(documentOffset - matchEndOffset) <= BUFFER && x >= matchEnd.right - BUFFER) return false;
-			if (x > matchEnd.right) return false;
+			// 末行：检查结束端边界（RTL 时结束端在右侧/该行末尾，视觉 right 为末行的右边界）
+			const endEdge = isRtl ? matchEnd.left : matchEnd.right;
+			if (Math.abs(documentOffset - matchEndOffset) <= BUFFER) {
+				if (isRtl ? x <= endEdge + BUFFER : x >= endEdge - BUFFER) return false;
+			}
+			if (isRtl ? x < matchEnd.left - BUFFER : x > matchEnd.right + BUFFER) return false;
 			return true;
 		}
 
@@ -721,9 +746,12 @@ export class LinkInterceptor {
 			getBoundingClientRect: () => {
 				const start = editorView.coordsAtPos(from);
 				const end = editorView.coordsAtPos(to);
-				if (start && end) {
-					lastRect = new DOMRect(start.left, start.top, Math.max(1, end.right - start.left), Math.max(1, start.bottom - start.top));
-				} else if (start) {
+			if (start && end) {
+				// Use min/max to correctly handle RTL text, where start.left > end.left
+				const rectLeft = Math.min(start.left, end.left);
+				const rectRight = Math.max(start.right, end.right);
+				lastRect = new DOMRect(rectLeft, start.top, Math.max(1, rectRight - rectLeft), Math.max(1, start.bottom - start.top));
+			} else if (start) {
 					// end 可能因 Live Preview 折叠区域在行尾而返回 null，用 start 构建矩形
 					lastRect = new DOMRect(start.left, start.top, 1, Math.max(1, start.bottom - start.top));
 				}
@@ -854,7 +882,10 @@ export class LinkInterceptor {
 			if (event.clientY < matchStart.top || event.clientY > matchStart.bottom) {
 				return null;
 			}
-			if (event.clientX > matchEnd.right || event.clientX < matchStart.left) {
+			// Use min/max to correctly handle RTL text, where matchStart is visually to the right of matchEnd
+			const linkLeft = Math.min(matchStart.left, matchEnd.left);
+			const linkRight = Math.max(matchStart.right, matchEnd.right);
+			if (event.clientX < linkLeft || event.clientX > linkRight) {
 				return null;
 			}
 		}

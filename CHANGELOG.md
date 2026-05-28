@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.4.7] - 2026-05-28
+
+### 🐛 Fixed
+
+- **RTL language support**: Fixed popover not appearing when hovering or clicking links on lines that start with neutral characters (`;`, `:`, spaces) or weak characters (numbers). The previous fix relied on the DOM `dir` attribute which CodeMirror does not set for such lines. Direction is now inferred directly from the visual coordinates returned by `coordsAtPos` — no DOM attribute needed.
+
+<details>
+<summary> 点我查看中文更新日志</summary>
+
+### 🐛 修复
+
+- **RTL 语言支持**：修复当行以中性字符（`;`、`:`、空格）或弱字符（数字）开头时，悬停或点击链接无法弹出浮窗的问题。之前的修复依赖 DOM `dir` 属性，而 CodeMirror 对这类行不设置该属性。现在直接通过 `coordsAtPos` 返回的视觉坐标推断文字方向，无需依赖任何 DOM 属性。
+
+</details>
+
+---
+
 ## [1.4.6] - 2026-05-15
 
 ### 🐛 Fixed
